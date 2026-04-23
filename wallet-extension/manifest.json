@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "MyChain Wallet",
+  "version": "1.0.0",
+  "description": "Cosmos 风格区块链钱包",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MyChain Wallet",
+    "default_icon": { "48": "icon.png" }
+  },
+  "icons": { "48": "icon.png" },
+  "permissions": ["storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["http://localhost/*"],
+    "js": ["content.js"],
+    "run_at": "document_start"
+  }]
+}

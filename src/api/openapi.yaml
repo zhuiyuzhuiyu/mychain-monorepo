@@ -1,0 +1,891 @@
+openapi: 3.0.3
+info:
+  title: Cosmos 风格区块链 API
+  version: 1.0.0
+  description: |
+    基于 Cosmos SDK 架构的 Node.js 区块链节点 REST API。
+
+    ## 接口关联关系（典型转账流程）
+
+    ```
+    ① POST /accounts          创建账户，获得 address + mnemonic
+         ↓
+    ② POST /mine              挖矿，矿工获得 BLOCK_REWARD (1,000,000 uatom) 余额
+         ↓
+    ③ POST /txs/sign          用 mnemonic 签名转账，交易进入内存池
+         ↓
+    ④ POST /mine              再次挖矿，打包内存池交易进区块
+         ↓
+    ⑤ GET  /txs/{hash}        查询交易是否已确认
+         ↓
+    ⑥ GET  /accounts/{address} 查看双方余额变化
+    ```
+
+    ## 核心密码学
+
+    - **密钥派生**: BIP39 助记词 → BIP32 HD 密钥（路径 `m/44'/118'/0'/0/0`）→ secp256k1 密钥对
+    - **地址计算**: SHA256(公钥) → RIPEMD160 → Bech32 编码（`cosmos1...` 前缀）
+    - **交易签名**: SHA256(JSON(body+authInfo)) → secp256k1 签名
+    - **共识机制**: Proof of Work，哈希前导零数量 = difficulty（默认3）
+
+servers:
+  - url: http://localhost:3000
+    description: 本地节点
+
+tags:
+  - name: info
+    description: 链配置信息
+  - name: accounts
+    description: |
+      账户模块。负责账户创建（BIP39+secp256k1）、余额查询、代币供应量查询。
+      **第一步**：调用 `POST /accounts` 创建账户，保存返回的 mnemonic。
+  - name: transactions
+    description: |
+      交易模块。支持服务端签名（/txs/sign）和客户端预签名（/txs）两种提交方式。
+      交易提交后进入内存池，需要**挖矿（POST /mine）**才能打包确认。
+  - name: blocks
+    description: |
+      区块模块。查询区块列表、区块详情、链状态。
+      每次挖矿成功后产生一个新区块，包含内存池中所有待确认交易。
+  - name: mining
+    description: |
+      挖矿模块。触发 Proof of Work，将内存池交易打包进新区块，矿工获得出块奖励。
+      **无论是否有待打包交易，挖矿都可以触发**（空块也可出块）。
+
+paths:
+  /api/info:
+    get:
+      tags: [info]
+      summary: 获取链配置信息
+      description: 返回链 ID、代币单位、挖矿难度、出块奖励等基本配置（来自 .env）。
+      responses:
+        '200':
+          description: 链配置信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainInfo'
+              example:
+                name: Cosmos-Inspired Blockchain
+                chainId: mychain-1
+                denom: uatom
+                difficulty: '3'
+                blockReward: '1000000'
+
+  /accounts:
+    post:
+      tags: [accounts]
+      summary: 创建新账户
+      description: |
+        服务端生成 BIP39 助记词，派生 secp256k1 密钥对，计算 Bech32 地址，写入链状态。
+
+        **实现步骤**
+
+        **① bip39.generateMnemonic()** — 生成 12 个英文助记词
+
+        **② bip39.mnemonicToSeedSync()** — 转换为 512 位种子
+
+        **③ bip32.fromSeed().derivePath("m/44'/118'/0'/0/0")** — HD 派生 secp256k1 密钥对
+
+        **④ 地址派生** — SHA256(公钥) → RIPEMD160 → bech32.encode('cosmos', ...) → cosmos1...
+
+        **⑤ createAccount(publicKey)** — 写入 state.accounts，分配 accountNumber，sequence=0
+
+        **⑥ save()** — 持久化到 chain.json
+
+        **注意：** mnemonic 只在此接口返回一次，请立即保存！
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: 新账户信息（含助记词）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewAccount'
+              example:
+                address: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                mnemonic: rely cabbage ribbon kitchen odor sustain bullet earth jump lift person world
+                publicKey: 02787b21510bb65421d9d4e893f5cd3c71c2bf527af4af374ee2d4f49c8e5bc7a1
+                accountNumber: 1
+                sequence: 0
+                warning: 请妥善保存助记词，不要泄露私钥！
+
+  /accounts/{address}:
+    get:
+      tags: [accounts]
+      summary: 查询账户信息与余额
+      description: |
+        返回账户的 accountNumber、sequence、公钥及所有代币余额。
+
+        **实现步骤**
+
+        **① getAccount(address)** — 从 state.accounts 查找，不存在返回 404
+
+        **② getAllBalances(address)** — 返回 state.balances[address] 中所有 {denom, amount} 对
+
+        **③** 组合返回账户信息 + 余额数组
+
+        **关联接口：** 创建账户后调用此接口确认余额；挖矿/转账后调用确认余额变化。
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Bech32 格式地址（cosmos1...）
+          schema:
+            type: string
+            example: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+      responses:
+        '200':
+          description: 账户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                address: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                accountNumber: 1
+                sequence: 3
+                publicKey: 02787b21510bb65421d9d4e893f5cd3c71c2bf527af4af374ee2d4f49c8e5bc7a1
+                balances:
+                  - denom: uatom
+                    amount: '3000000'
+        '404':
+          description: 账户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 账户不存在
+
+  /accounts/supply/{denom}:
+    get:
+      tags: [accounts]
+      summary: 查询代币总供应量
+      description: |
+        返回指定代币（denom）的全链总供应量。
+
+        **实现步骤**
+
+            supply = state.supply[denom]
+            // 读取全局供应量表，key 为代币单位（如 uatom），value 为字符串金额
+
+            // supply 在两处增加：
+            // 1. initGenesis() 创世时 mint(genesisAddress, GENESIS_SUPPLY)
+            // 2. 每次挖矿成功后 mint(minerAddress, BLOCK_REWARD)
+
+        **关联接口：** 可与 GET /api/info 配合使用，确认当前流通总量。
+      parameters:
+        - name: denom
+          in: path
+          required: true
+          description: 代币单位，如 uatom
+          schema:
+            type: string
+            example: uatom
+      responses:
+        '200':
+          description: 代币总供应量
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Supply'
+              example:
+                denom: uatom
+                totalSupply: '1001000000000'
+
+  /txs/sign:
+    post:
+      tags: [transactions]
+      summary: 服务端签名并广播交易
+      description: |
+        前端传入助记词，服务端推导私钥、构造并签名交易，加入内存池。
+        **适用场景：** Web App / 插件钱包，助记词由用户临时提供给服务端签名。
+
+        **实现步骤**
+
+        **① keyPairFromMnemonic(mnemonic)** — 推导 {privateKey, publicKey}
+
+        **② pubKeyToAddress(publicKey)** — 推导地址，必须与 from 字段一致（防助记词伪造）
+
+        **③ getAccount(from).sequence** — 获取当前 sequence，用于防重放
+
+        **④ createTx()** — 构造并签名交易
+
+            body = {typeUrl: '/cosmos.bank.v1beta1.MsgSend', from, to, amount, memo}
+            // 交易消息体：类型标识 + 转账四要素（发送方、接收方、金额、备注）
+
+            authInfo = {sequence, fee: {denom, amount: '1000'}}
+            // 认证信息：sequence 用于防重放，fee 为手续费（固定 1000 uatom）
+
+            txHash = SHA256(JSON(body + authInfo))
+            // 交易哈希：对消息体和认证信息序列化后做哈希，作为交易唯一标识
+
+            signature = secp256k1.sign(txHash, privateKey)
+            // 用发送方私钥对交易哈希签名，证明发送方身份，防止伪造
+
+        **⑤ addTx(tx)** — validateTx 验证哈希 + 签名 + sequence → 写入内存池
+
+        **关联接口：** 提交后需调用 POST /mine 打包，再用 GET /txs/{hash} 确认。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignTxRequest'
+            example:
+              from: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+              mnemonic: rely cabbage ribbon kitchen odor sustain bullet earth jump lift person world
+              to: cosmos1abc123def456ghi789jkl012mno345pqr678stu
+              amount: '1000000'
+              memo: 转账备注（可选）
+      responses:
+        '200':
+          description: 交易已加入内存池
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TxSubmitResult'
+        '400':
+          description: 参数错误或验证失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                mismatch:
+                  summary: 助记词与地址不匹配
+                  value:
+                    error: 助记词与地址不匹配：期望 cosmos1abc..., 推导出 cosmos1xyz...
+                sequence:
+                  summary: 序列号不匹配
+                  value:
+                    error: 序列号不匹配：期望 2, 收到 0
+                balance:
+                  summary: 余额不足
+                  value:
+                    error: 余额不足：有 500000 uatom，需要 1000000
+
+  /txs:
+    post:
+      tags: [transactions]
+      summary: 提交已签名的原始交易
+      description: |
+        客户端（如 Chrome 插件）自行完成签名，将完整交易对象提交到节点。
+        **适用场景：** 客户端钱包（私钥不离开本地），服务端只做验证和广播。
+
+        **验证流程（addTx）**
+
+            expectedHash = SHA256(JSON(body + authInfo))
+            // 重新计算哈希并与 tx.hash 比对，确保交易内容未被篡改
+
+            secp256k1.verify(tx.hash, signature, publicKey)
+            // 用发送方公钥验证签名，确认交易确实由私钥持有者发起
+
+            validateSequence(from, sequence)
+            // 校验 sequence 等于账户当前值，防止历史交易被重复广播（重放攻击）
+
+        **关联接口：** 与 POST /txs/sign 功能等价，差异在签名发生位置。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Transaction'
+      responses:
+        '200':
+          description: 交易已加入内存池
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txHash:
+                    type: string
+                  status:
+                    type: string
+              example:
+                txHash: a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+                status: 已加入内存池，等待打包
+        '400':
+          description: 验证失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /txs/pending:
+    get:
+      tags: [transactions]
+      summary: 查询内存池待打包交易
+      description: |
+        返回当前内存池中所有等待被打包的交易。
+
+        **实现：** `getPending()` 返回 mempool 的 pending 数组副本。
+
+        **关联接口：** 提交交易后可调用此接口确认进入内存池；挖矿后内存池清空。
+      responses:
+        '200':
+          description: 内存池交易列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+              example:
+                pending:
+                  - hash: a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+                    body:
+                      typeUrl: /cosmos.bank.v1beta1.MsgSend
+                      from: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                      to: cosmos1abc123def456ghi789jkl012mno345pqr678stu
+                      amount:
+                        - denom: uatom
+                          amount: '1000000'
+                      memo: ''
+                    authInfo:
+                      sequence: 0
+                      fee:
+                        denom: uatom
+                        amount: '1000'
+                    timestamp: '2026-04-21T10:00:00.000Z'
+
+  /txs/{hash}:
+    get:
+      tags: [transactions]
+      summary: 查询交易详情
+      description: |
+        按哈希查询交易，先查链上已确认索引，再查内存池。
+
+        **实现步骤**
+
+            result = getTxByHash(hash)
+            // 先查链上已确认索引 state.txIndex，命中则返回 {tx, blockHeight}，status="已确认"
+
+            if (!result) searchInPending(getPending(), hash)
+            // 未命中则遍历内存池，命中则 status="待确认（内存池中）"
+
+            if (!result) return 404
+            // 均未找到，说明该哈希不存在或已被孤立，返回 404
+
+        **关联接口：** POST /txs/sign 返回 txHash 后，挖矿前状态为"待确认"，挖矿后变为"已确认"。
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: 交易哈希（64位十六进制字符串）
+          schema:
+            type: string
+            example: a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+      responses:
+        '200':
+          description: 交易详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TxResult'
+              examples:
+                confirmed:
+                  summary: 已确认
+                  value:
+                    tx:
+                      hash: a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+                      body:
+                        typeUrl: /cosmos.bank.v1beta1.MsgSend
+                        from: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                        to: cosmos1abc123def456ghi789jkl012mno345pqr678stu
+                        amount:
+                          - denom: uatom
+                            amount: '1000000'
+                        memo: ''
+                      authInfo:
+                        sequence: 0
+                        fee:
+                          denom: uatom
+                          amount: '1000'
+                      signature: 3045022100...
+                      publicKey: 02787b21510b...
+                      timestamp: '2026-04-21T10:00:00.000Z'
+                    blockHeight: 5
+                    status: 已确认
+                pending:
+                  summary: 待确认（内存池中）
+                  value:
+                    tx:
+                      hash: a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b
+                    status: 待确认（内存池中）
+        '404':
+          description: 交易不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 交易不存在
+
+  /blocks/status:
+    get:
+      tags: [blocks]
+      summary: 链状态概览
+      description: |
+        返回当前链高度、最新区块哈希和时间戳。用于监控链是否正常运行。
+
+        **实现：** `getLatestBlock()` + `getHeight()` 组合返回。
+      responses:
+        '200':
+          description: 链状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainStatus'
+              example:
+                height: 5
+                latestHash: 000a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0
+                latestTime: '2026-04-21T10:05:00.000Z'
+
+  /blocks/latest:
+    get:
+      tags: [blocks]
+      summary: 获取最新区块
+      description: |
+        返回完整的最新区块对象，含区块头和所有交易。
+
+        **关联接口：** 挖矿成功后可调用此接口查看刚出的区块。
+      responses:
+        '200':
+          description: 最新区块
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+
+  /blocks:
+    get:
+      tags: [blocks]
+      summary: 区块列表（最新在前）
+      description: |
+        返回最近 limit 个区块的摘要信息，按高度降序排列。
+
+        **实现：** `getBlocks()` 取最后 limit 条，reverse 后 map 成摘要对象。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: 返回数量（默认 20）
+          schema:
+            type: integer
+            default: 20
+            example: 10
+      responses:
+        '200':
+          description: 区块列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    description: 链上区块总数
+                  blocks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BlockSummary'
+              example:
+                total: 5
+                blocks:
+                  - height: 5
+                    hash: 000a3f82c1d4e5b6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0
+                    timestamp: '2026-04-21T10:05:00.000Z'
+                    proposer: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                    txCount: 2
+                    nonce: 14823
+
+  /blocks/{height}:
+    get:
+      tags: [blocks]
+      summary: 按高度查询区块详情
+      description: |
+        返回指定高度的完整区块，含区块头所有字段和交易列表。
+
+        **实现：** `getBlock(height)` 在 state.blocks 数组中查找 `header.height === height`。
+
+        **区块头字段说明：**
+        - `previousHash`: 前驱区块哈希，创世块为 64 个 "0"
+        - `transactionsRoot`: 所有交易哈希的 SHA256（简化 Merkle）
+        - `stateRoot`: 当前 state（accounts+balances+supply）的 SHA256 快照
+        - `nonce`: PoW 找到的随机数，使 SHA256(header) 满足前导零要求
+      parameters:
+        - name: height
+          in: path
+          required: true
+          description: 区块高度（正整数，创世块为 1）
+          schema:
+            type: integer
+            minimum: 1
+            example: 3
+      responses:
+        '200':
+          description: 区块详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Block'
+        '404':
+          description: 区块不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 区块不存在
+
+  /mine:
+    post:
+      tags: [mining]
+      summary: 触发 PoW 挖矿，打包交易出块
+      description: |
+        矿工提交地址，节点执行 Proof of Work，将内存池交易打包进新区块，矿工获得出块奖励。
+
+        **实现步骤（mine(minerAddress)）**
+
+        **① flush()** — 取出内存池全部交易并清空
+
+        **② getLatestBlock()** — 获取前驱区块，计算 height+1 和 prevHash
+
+        **③ createBlockTemplate()** — 构造区块头，含 stateRoot、transactionsRoot、proposer、difficulty、nonce=0
+
+        **④ mineBlock() — PoW 循环**
+
+            while (true) {
+              hash = SHA256(JSON(header))       // 对完整区块头做 SHA256 哈希
+              if (hash.startsWith("000")) break // 哈希前3位为0则满足难度目标，退出循环
+              header.nonce++                    // 不满足则 nonce 自增，重新尝试
+            }
+
+        **⑤ validateBlock()** — 验证 PoW 是否满足难度目标 + 哈希一致 + 前驱关系 + 高度连续
+
+        **⑥ addBlock() — 执行区块**
+
+            executeTx(tx)              // 执行交易：调用 bank.send() 从发送方扣款并转入接收方
+
+            incrementSequence(from)    // 发送方 sequence+1，防止同一笔交易被重复提交（重放攻击）
+
+            mint(miner, BLOCK_REWARD)  // 向矿工铸造 1,000,000 uatom 出块奖励（新增代币，增加总供应量）
+
+            save()                     // 将最新状态（区块、余额、账户）序列化写入 chain.json 持久化
+
+        **注意：** difficulty=3 通常毫秒级完成；difficulty=6+ 可能需要数秒。
+
+        **关联接口：** 挖矿后可用 GET /blocks/latest 查看新区块，GET /accounts/{address} 确认奖励到账。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MineRequest'
+            example:
+              minerAddress: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+      responses:
+        '200':
+          description: 挖矿成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MineResult'
+              example:
+                message: 挖矿成功
+                block:
+                  height: 6
+                  hash: 000c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3
+                  timestamp: '2026-04-21T10:06:00.000Z'
+                  nonce: 9341
+                  txCount: 1
+                  proposer: cosmos1sucawcu754z6p0ecet45vl0mls3qfl6n09j
+                reward: 1000000 uatom
+                minerBalance:
+                  uatom: '6000000'
+        '400':
+          description: 参数错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: 矿工账户不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 矿工账户不存在，请先创建账户
+
+components:
+  schemas:
+    ChainInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        chainId:
+          type: string
+        denom:
+          type: string
+        difficulty:
+          type: string
+        blockReward:
+          type: string
+
+    NewAccount:
+      type: object
+      properties:
+        address:
+          type: string
+          description: Bech32 格式地址（cosmos1...）
+        mnemonic:
+          type: string
+          description: BIP39 12词助记词，只返回一次，请立即保存
+        publicKey:
+          type: string
+          description: secp256k1 压缩公钥（33字节，十六进制）
+        accountNumber:
+          type: integer
+          description: 链上唯一账号编号（从0递增）
+        sequence:
+          type: integer
+          description: 初始为0，每笔已确认交易后+1
+        warning:
+          type: string
+
+    Account:
+      type: object
+      properties:
+        address:
+          type: string
+        accountNumber:
+          type: integer
+        sequence:
+          type: integer
+          description: 下一笔交易需使用此 sequence，防重放攻击
+        publicKey:
+          type: string
+        balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/Balance'
+
+    Balance:
+      type: object
+      properties:
+        denom:
+          type: string
+          example: uatom
+        amount:
+          type: string
+          description: 使用字符串避免 JavaScript 大数精度丢失
+
+    Supply:
+      type: object
+      properties:
+        denom:
+          type: string
+        totalSupply:
+          type: string
+
+    SignTxRequest:
+      type: object
+      required: [from, mnemonic, to, amount]
+      properties:
+        from:
+          type: string
+          description: 发送方 Bech32 地址
+        mnemonic:
+          type: string
+          description: 发送方 BIP39 助记词，用于服务端推导私钥签名
+        to:
+          type: string
+          description: 接收方 Bech32 地址
+        amount:
+          type: string
+          description: 转账金额（uatom，字符串）
+        memo:
+          type: string
+          description: 可选备注
+
+    Transaction:
+      type: object
+      properties:
+        hash:
+          type: string
+          description: SHA256(JSON(body+authInfo))，唯一标识
+        body:
+          $ref: '#/components/schemas/TransactionBody'
+        authInfo:
+          $ref: '#/components/schemas/AuthInfo'
+        signature:
+          type: string
+          description: secp256k1 签名（十六进制）
+        publicKey:
+          type: string
+          description: 发送方公钥（用于验签）
+        timestamp:
+          type: string
+          format: date-time
+
+    TransactionBody:
+      type: object
+      properties:
+        typeUrl:
+          type: string
+          example: /cosmos.bank.v1beta1.MsgSend
+          description: Cosmos SDK 消息类型标识
+        from:
+          type: string
+        to:
+          type: string
+        amount:
+          type: array
+          items:
+            $ref: '#/components/schemas/Balance'
+        memo:
+          type: string
+
+    AuthInfo:
+      type: object
+      properties:
+        sequence:
+          type: integer
+          description: 防重放序列号，必须等于账户当前 sequence
+        fee:
+          $ref: '#/components/schemas/Balance'
+
+    TxSubmitResult:
+      type: object
+      properties:
+        txHash:
+          type: string
+        status:
+          type: string
+        tx:
+          $ref: '#/components/schemas/Transaction'
+
+    TxResult:
+      type: object
+      properties:
+        tx:
+          $ref: '#/components/schemas/Transaction'
+        blockHeight:
+          type: integer
+          description: 仅已确认交易有此字段
+        status:
+          type: string
+          enum: [已确认, 待确认（内存池中）]
+
+    Block:
+      type: object
+      properties:
+        header:
+          $ref: '#/components/schemas/BlockHeader'
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        hash:
+          type: string
+          description: SHA256(JSON(header))，满足 PoW 难度目标
+
+    BlockHeader:
+      type: object
+      properties:
+        height:
+          type: integer
+        chainId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        previousHash:
+          type: string
+          description: 前驱区块哈希（创世块为 64 个 "0"）
+        transactionsRoot:
+          type: string
+          description: 所有交易哈希的 SHA256（简化 Merkle 根）
+        stateRoot:
+          type: string
+          description: SHA256(JSON(accounts+balances+supply)) 状态快照
+        proposer:
+          type: string
+          description: 矿工地址
+        difficulty:
+          type: integer
+          description: 哈希前导零个数要求
+        nonce:
+          type: integer
+          description: PoW 满足条件时的随机数
+
+    BlockSummary:
+      type: object
+      properties:
+        height:
+          type: integer
+        hash:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        proposer:
+          type: string
+        txCount:
+          type: integer
+        nonce:
+          type: integer
+
+    ChainStatus:
+      type: object
+      properties:
+        height:
+          type: integer
+        latestHash:
+          type: string
+        latestTime:
+          type: string
+          format: date-time
+
+    MineRequest:
+      type: object
+      required: [minerAddress]
+      properties:
+        minerAddress:
+          type: string
+          description: 矿工的 Bech32 地址（必须已通过 POST /accounts 创建）
+
+    MineResult:
+      type: object
+      properties:
+        message:
+          type: string
+        block:
+          $ref: '#/components/schemas/BlockSummary'
+        reward:
+          type: string
+          description: 本次出块奖励，如 "1000000 uatom"
+        minerBalance:
+          type: object
+          additionalProperties:
+            type: string
+          description: 挖矿后矿工各代币余额
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string

@@ -1,7 +1,9 @@
+const DEFAULT_NODE_URL = 'http://3.148.112.169';
+
 // 动态读取用户配置的节点地址
 async function getNodeUrl(): Promise<string> {
   const result = await chrome.storage.local.get('nodeUrl');
-  return (result.nodeUrl as string) || 'http://localhost:3000';
+  return (result.nodeUrl as string) || DEFAULT_NODE_URL;
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

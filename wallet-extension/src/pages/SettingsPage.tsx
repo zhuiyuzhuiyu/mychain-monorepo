@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 
+const DEFAULT_NODE_URL = 'http://3.148.112.169';
+
 const s: Record<string, React.CSSProperties> = {
   wrap: { padding: '20px 16px', display: 'flex', flexDirection: 'column', gap: 14 },
   title: { fontSize: 15, fontWeight: 600, color: '#e2e8f0', margin: 0 },
@@ -23,7 +25,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     chrome.storage.local.get('nodeUrl', res => {
-      setUrl((res.nodeUrl as string) || 'http://localhost:3000');
+      setUrl((res.nodeUrl as string) || DEFAULT_NODE_URL);
     });
   }, []);
 
@@ -45,14 +47,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           style={s.input}
           value={url}
           onChange={e => setUrl(e.target.value)}
-          placeholder="http://your-ec2-ip:3000"
+          placeholder={DEFAULT_NODE_URL}
           spellCheck={false}
         />
       </div>
 
       <p style={s.tip}>
-        部署到 EC2 后，填写区块链节点的公网地址。<br />
-        例如：<code style={{ color: '#93c5fd' }}>http://1.2.3.4:3000</code>
+        默认会连接当前线上节点。<br />
+        如果你换了服务器，也可以在这里改成新的公网地址。
       </p>
 
       {saved && <p style={s.saved}>✓ 已保存</p>}

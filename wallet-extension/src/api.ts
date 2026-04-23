@@ -1,7 +1,9 @@
-// 动态读取节点地址，支持用户在插件设置页配置，默认回退 localhost:3000
+const DEFAULT_NODE_URL = 'http://3.148.112.169';
+
+// 动态读取节点地址，支持用户在插件设置页配置，默认回退到线上节点
 async function getBase(): Promise<string> {
   const result = await chrome.storage.local.get('nodeUrl');
-  return (result.nodeUrl as string) || 'http://localhost:3000';
+  return (result.nodeUrl as string) || DEFAULT_NODE_URL;
 }
 
 export interface Coin { denom: string; amount: string; }
